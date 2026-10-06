@@ -24,7 +24,7 @@
   li.active { background:#232a40; border-radius:8px; }
   .idx, .meta small { color:var(--muted); }
   .meta small { display:block; }
-  .embed iframe { width:100%; border:0; margin-top:10px; }
+  .embed iframe, .embed embed { width:100%; border:0; margin-top:10px; }
 </style>
 </head>
 <body>
@@ -58,22 +58,29 @@ const statusEl = document.getElementById("status");
 let tracks = [];
 let index = 0;
 
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
 function loadPage(start) {
-  const cb = "tumblrCb_" + start + "_" + Date.now();
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error("Tumblr API timed out"));
-    }, 20000);
-    function cleanup() {
-      clearTimeout(timer);
-      delete window[cb];
-      s.remove();
-    }
-    window[cb] = (data) => { cleanup(); resolve(data); };
     const s = document.createElement("script");
-    s.src = `https://${BLOG}/api/read/json?type=audio&num=50&start=${start}&callback=${cb}`;
-    s.onerror = () => { cleanup(); reject(new Error("Could not load Tumblr API")); };
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error("Tumblr API timed out")), 20000);
+    function finish(err, data) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      s.remove();
+      if (err) reject(err);
+      else resolve(data);
+    }
+    s.onload = () => {
+      const data = window.tumblr_api_read;
+      window.tumblr_api_read = undefined;
+      if (!data || !data.posts) finish(new Error("Tumblr API returned no posts"));
+      else finish(null, data);
+    };
+    s.onerror = () => finish(new Error("Could not load Tumblr API"));
+    s.src = `https://${BLOG}/api/read/json?type=audio&num=50&start=${start}&_=${Date.now()}`;
     document.head.appendChild(s);
   });
 }
@@ -87,6 +94,7 @@ function strip(html) {
 function withPlead(url) {
   if (!url) return null;
   if (url.startsWith("//")) url = "https:" + url;
+  try { url = decodeURIComponent(url); } catch (_) {}
   if (!/^https?:/i.test(url)) return null;
   if (/[?&]plead=/.test(url)) return url;
   return url + (url.includes("?") ? "&" : "?") + PLEAD;
@@ -94,17 +102,17 @@ function withPlead(url) {
 
 function audioUrl(post) {
   const blob = `${post["audio-embed"] || ""} ${post["audio-player"] || ""}`;
-  const iframe = blob.match(/src=["']([^"']+)["']/i);
   const candidates = [];
-  if (iframe) {
+  const src = blob.match(/src=["']([^"']+)["']/i);
+  if (src) {
+    const raw = src[1].startsWith("//") ? "https:" + src[1] : src[1];
     try {
-      const u = new URL(iframe[1].startsWith("//") ? "https:" + iframe[1] : iframe[1]);
-      const file = u.searchParams.get("audio_file");
+      const file = new URL(raw).searchParams.get("audio_file");
       if (file) candidates.push(file);
     } catch (_) {}
   }
   const loose = blob.match(/audio_file=([^"'&\s]+)/i);
-  if (loose) candidates.push(decodeURIComponent(loose[1]));
+  if (loose) candidates.push(loose[1]);
   const mp3 = blob.match(/https?:[^"'>\s]+\.mp3/i);
   if (mp3) candidates.push(mp3[0]);
   return withPlead(candidates[0] || null);
@@ -128,9 +136,18 @@ async function loadAll() {
   let start = 0;
   let total = Infinity;
   while (start < total) {
-    const data = await loadPage(start);
-    const posts = data && data.posts;
-    if (!posts || !posts.length) break;
+    let data;
+    try {
+      data = await loadPage(start);
+    } catch (err) {
+      if (tracks.length) {
+        statusEl.textContent = `Stopped at ${tracks.length}: ${err.message}`;
+        return;
+      }
+      throw err;
+    }
+    const posts = data.posts || [];
+    if (!posts.length) break;
     total = Number(data["posts-total"] || total);
     for (const post of posts) {
       const t = normalize(post);
@@ -141,6 +158,7 @@ async function loadAll() {
     start += posts.length;
     statusEl.textContent = `Loaded ${tracks.length}${Number.isFinite(total) ? " of " + total : ""}`;
     if (posts.length < 50) break;
+    await sleep(400);
   }
 }
 
@@ -171,7 +189,12 @@ function renderList() {
 function showEmbed(t) {
   embedEl.innerHTML = t.embed || "";
   if (!embedEl.innerHTML && t.url) {
-    embedEl.innerHTML = `<p><a href="${t.url}" target="_blank" rel="noopener">Open post</a></p>`;
+    const a = document.createElement("a");
+    a.href = t.url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "Open post";
+    embedEl.append(a);
   }
 }
 
@@ -199,7 +222,9 @@ document.getElementById("prev").onclick = () => play(index - 1, true);
 document.getElementById("next").onclick = () => play(index + 1, true);
 
 loadAll().then(() => {
-  statusEl.textContent = tracks.length ? `${tracks.length} tracks — click one to play` : "No audio posts returned";
+  statusEl.textContent = tracks.length
+    ? `${tracks.length} tracks — click one to play`
+    : "No audio posts returned";
   renderList();
   if (tracks.length) play(0, false);
 }).catch((err) => {
