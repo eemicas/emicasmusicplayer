@@ -12,7 +12,8 @@
   h1 { margin:0; font-size:20px; }
   a { color:var(--accent); }
   .status { color:var(--muted); font-size:13px; }
-  .now { margin:12px 24px 18px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .now { margin:12px 24px 18px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; display:grid; grid-template-columns:88px 1fr; gap:14px; }
+  .now img { width:88px; height:88px; object-fit:cover; border-radius:8px; background:#2a3148; }
   .now h2 { margin:0 0 4px; font-size:18px; }
   .artist { color:var(--muted); margin-bottom:12px; }
   audio { width:100%; }
@@ -24,7 +25,8 @@
   li.active { background:#232a40; border-radius:8px; }
   .idx, .meta small { color:var(--muted); }
   .meta small { display:block; }
-  .embed iframe, .embed embed { width:100%; border:0; margin-top:10px; }
+  .embed iframe { width:100%; border:0; margin-top:10px; }
+  @media (max-width:640px) { .now { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -36,31 +38,37 @@
   <a href="https://martinunderscoreclark.tumblr.com/archive/filter-by/audio" target="_blank" rel="noopener">Open archive</a>
 </header>
 <section class="now">
-  <h2 id="title">—</h2>
-  <div class="artist" id="artist"></div>
-  <audio id="player" controls preload="none"></audio>
-  <div class="controls">
-    <button id="prev">Previous</button>
-    <button id="next">Next</button>
+  <img id="art" alt="">
+  <div>
+    <h2 id="title">—</h2>
+    <div class="artist" id="artist"></div>
+    <audio id="player" controls preload="none"></audio>
+    <div class="controls">
+      <button id="prev">Previous</button>
+      <button id="next">Next</button>
+    </div>
+    <div class="embed" id="embed"></div>
   </div>
-  <div class="embed" id="embed"></div>
 </section>
 <ul id="list"></ul>
 <script>
 const BLOG = "martinunderscoreclark.tumblr.com";
+const KEY = "fuiKNFp9vQFvjLNvx4sUwti4Yb5yGutBN4Xh10LXZhhRKjWlV4";
 const PLEAD = "plead=please-dont-download-this-or-our-lawyers-wont-let-us-host-audio";
 const player = document.getElementById("player");
 const listEl = document.getElementById("list");
 const titleEl = document.getElementById("title");
 const artistEl = document.getElementById("artist");
 const embedEl = document.getElementById("embed");
+const artEl = document.getElementById("art");
 const statusEl = document.getElementById("status");
 let tracks = [];
 let index = 0;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-function loadPage(start) {
+function loadPage(offset) {
+  const cb = "tumblrV2_" + offset + "_" + Date.now();
   return new Promise((resolve, reject) => {
     const s = document.createElement("script");
     let settled = false;
@@ -69,18 +77,15 @@ function loadPage(start) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      delete window[cb];
       s.remove();
       if (err) reject(err);
       else resolve(data);
     }
-    s.onload = () => {
-      const data = window.tumblr_api_read;
-      window.tumblr_api_read = undefined;
-      if (!data || !data.posts) finish(new Error("Tumblr API returned no posts"));
-      else finish(null, data);
-    };
+    window[cb] = (data) => finish(null, data);
     s.onerror = () => finish(new Error("Could not load Tumblr API"));
-    s.src = `https://${BLOG}/api/read/json?type=audio&num=50&start=${start}&_=${Date.now()}`;
+    s.src = "https://api.tumblr.com/v2/blog/" + BLOG + "/posts?api_key=" + KEY +
+      "&type=audio&limit=20&offset=" + offset + "&jsonp=" + cb;
     document.head.appendChild(s);
   });
 }
@@ -93,72 +98,46 @@ function strip(html) {
 
 function withPlead(url) {
   if (!url) return null;
-  if (url.startsWith("//")) url = "https:" + url;
-  try { url = decodeURIComponent(url); } catch (_) {}
-  if (!/^https?:/i.test(url)) return null;
   if (/[?&]plead=/.test(url)) return url;
   return url + (url.includes("?") ? "&" : "?") + PLEAD;
 }
 
-function audioUrl(post) {
-  const blob = `${post["audio-embed"] || ""} ${post["audio-player"] || ""}`;
-  const candidates = [];
-  const src = blob.match(/src=["']([^"']+)["']/i);
-  if (src) {
-    const raw = src[1].startsWith("//") ? "https:" + src[1] : src[1];
-    try {
-      const file = new URL(raw).searchParams.get("audio_file");
-      if (file) candidates.push(file);
-    } catch (_) {}
-  }
-  const loose = blob.match(/audio_file=([^"'&\s]+)/i);
-  if (loose) candidates.push(loose[1]);
-  const mp3 = blob.match(/https?:[^"'>\s]+\.mp3/i);
-  if (mp3) candidates.push(mp3[0]);
-  return withPlead(candidates[0] || null);
-}
-
 function normalize(post) {
   return {
-    id: String(post.id),
-    title: post["id3-title"] || strip(post["audio-caption"]).slice(0, 140) || "Untitled",
-    artist: post["id3-artist"] || "",
-    album: post["id3-album"] || "",
-    date: post["date-gmt"] || post.date || "",
-    url: post["url-with-slug"] || post.url || "",
-    file: audioUrl(post),
-    embed: post["audio-embed"] || post["audio-player"] || ""
+    id: String(post.id_string || post.id),
+    title: post.track_name || strip(post.summary || post.caption).slice(0, 140) || "Untitled",
+    artist: post.artist || "",
+    album: post.album || "",
+    art: post.album_art || "",
+    date: post.date || "",
+    url: post.post_url || "",
+    file: withPlead(post.audio_url || post.audio_source_url || null),
+    embed: post.player || post.embed || ""
   };
 }
 
 async function loadAll() {
   const seen = new Set();
-  let start = 0;
+  let offset = 0;
   let total = Infinity;
-  while (start < total) {
-    let data;
-    try {
-      data = await loadPage(start);
-    } catch (err) {
-      if (tracks.length) {
-        statusEl.textContent = `Stopped at ${tracks.length}: ${err.message}`;
-        return;
-      }
-      throw err;
+  while (offset < total) {
+    const data = await loadPage(offset);
+    if (!data || !data.meta || data.meta.status !== 200) {
+      throw new Error((data && data.meta && data.meta.msg) || "Tumblr API rejected the request");
     }
-    const posts = data.posts || [];
+    const posts = (data.response && data.response.posts) || [];
+    total = Number((data.response && data.response.total_posts) || total);
     if (!posts.length) break;
-    total = Number(data["posts-total"] || total);
     for (const post of posts) {
       const t = normalize(post);
       if (seen.has(t.id)) continue;
       seen.add(t.id);
       tracks.push(t);
     }
-    start += posts.length;
-    statusEl.textContent = `Loaded ${tracks.length}${Number.isFinite(total) ? " of " + total : ""}`;
-    if (posts.length < 50) break;
-    await sleep(400);
+    offset += posts.length;
+    statusEl.textContent = "Loaded " + tracks.length + (Number.isFinite(total) ? " of " + total : "");
+    if (posts.length < 20) break;
+    await sleep(300);
   }
 }
 
@@ -170,7 +149,7 @@ function renderList() {
     const strong = document.createElement("strong");
     strong.textContent = t.title;
     const small = document.createElement("small");
-    small.textContent = [t.artist, t.album, t.date].filter(Boolean).join(" · ");
+    small.textContent = [t.artist, t.album].filter(Boolean).join(" · ");
     const meta = document.createElement("span");
     meta.className = "meta";
     meta.append(strong, small);
@@ -204,6 +183,8 @@ function play(i, fromClick) {
   const t = tracks[index];
   titleEl.textContent = t.title;
   artistEl.textContent = [t.artist, t.album].filter(Boolean).join(" — ");
+  artEl.src = t.art || "";
+  artEl.hidden = !t.art;
   embedEl.innerHTML = "";
   [...listEl.children].forEach((li) => li.classList.toggle("active", Number(li.dataset.i) === index));
   if (t.file) {
@@ -222,9 +203,7 @@ document.getElementById("prev").onclick = () => play(index - 1, true);
 document.getElementById("next").onclick = () => play(index + 1, true);
 
 loadAll().then(() => {
-  statusEl.textContent = tracks.length
-    ? `${tracks.length} tracks — click one to play`
-    : "No audio posts returned";
+  statusEl.textContent = tracks.length ? tracks.length + " tracks — click one to play" : "No audio posts returned";
   renderList();
   if (tracks.length) play(0, false);
 }).catch((err) => {
